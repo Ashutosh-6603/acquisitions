@@ -7,6 +7,7 @@ This repo runs an Express app that talks to Postgres via Neon.
 ### Development (local) — Neon Local (Docker)
 
 Development uses **Neon Local** (a local proxy container) to:
+
 - expose a local Postgres endpoint at `neon-local:5432`
 - automatically create an **ephemeral Neon branch** on container startup (when `PARENT_BRANCH_ID` is set)
 - delete that branch on container shutdown (default behavior)

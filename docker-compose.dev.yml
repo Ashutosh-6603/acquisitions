@@ -3,7 +3,7 @@ services:
     image: neondatabase/neon_local:latest
     container_name: acquisitions-neon-local
     ports:
-      - "5432:5432"
+      - '5432:5432'
     # Needs NEON_API_KEY, NEON_PROJECT_ID and (for ephemeral branches) PARENT_BRANCH_ID
     env_file:
       - .env.development
@@ -12,7 +12,7 @@ services:
       - ./.neon_local/:/tmp/.neon_local
       - ./.git/HEAD:/tmp/.git/HEAD:ro,consistent
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "5432", "-U", "neon"]
+      test: ['CMD', 'pg_isready', '-h', 'localhost', '-p', '5432', '-U', 'neon']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -28,7 +28,7 @@ services:
       target: development
     container_name: acquisitions-app-dev
     ports:
-      - "${PORT:-3000}:3000"
+      - '${PORT:-3000}:3000'
     env_file:
       - .env.development
     volumes:
