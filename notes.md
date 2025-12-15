@@ -1,129 +1,186 @@
-# Acquisitions API — Architecture Notes
+# Acquisitions API — Architecture Notes (updated 2025-12-15)
 
 ## 1) Big Picture
-- **Project type:** Node.js (ESM) + Express API
-- **Purpose:** Backend API for an “Acquisitions” system; currently includes health endpoints and an authentication module with sign-up implemented.
+**What it is:** A Node.js (ESM) + Express REST API.
+
+**What it does:**
+- Provides basic health/info endpoints.
+- Implements authentication (sign-up, sign-in, sign-out) using **JWT** stored in an **HTTP-only cookie**.
+- Implements a **Users** module intended for authenticated CRUD (fetch/update/delete users), with role-based access control (admin vs user).
+- Persists data to **PostgreSQL** (typically Neon / Neon Local) via **Drizzle ORM**.
+- Adds request security controls using **Arcjet** (shield + bot detection + rate limiting).
 
 ## 2) Core Architecture
-- **Style:** Single-service monolith with a layered / MVC-ish structure.
-- **Layers:**
-  - **Routes** map endpoints to controllers
-  - **Controllers** handle HTTP concerns (validation, status codes, cookies)
-  - **Services** implement business logic and DB interaction
-  - **Models** define DB schema (Drizzle)
-  - **Config/Utils** provide cross-cutting concerns (db, logging, jwt, cookies)
+This is a **single-service modular monolith** with a mostly-layered structure:
 
-## 3) Major Modules / Files
+- **HTTP layer (Express)**
+  - `src/app.js` wires middleware and routes.
+  - `src/routes/*` defines endpoint-to-controller mapping.
+- **Controller layer**
+  - `src/controllers/*` performs request validation and shapes HTTP responses.
+- **Service layer**
+  - `src/services/*` contains business logic and database interactions.
+- **Data access / schema layer**
+  - `src/models/*` defines Drizzle table schemas.
+  - `drizzle/` contains migrations.
+- **Cross-cutting utilities**
+  - `src/config/*` for infra (DB, logger, Arcjet).
+  - `src/utils/*` for JWT, cookies, validation formatting.
+  - `src/middleware/*` for request security (and intended auth).
+
+### High-level module map
+```text
+src/index.js
+  -> loads dotenv
+  -> imports src/server.js
+
+src/server.js
+  -> app.listen(PORT)
+
+src/app.js
+  -> express + middleware stack
+  -> routes: /api/auth, /api/users
+```
+
+## 3) Key Components (by folder/module)
 
 ### Bootstrapping
-- `src/index.js`
-  - Loads environment (`dotenv/config`) and imports `src/server.js`.
-- `src/server.js`
-  - Starts listening on `PORT` and binds the Express app.
-- `src/app.js`
-  - Express app setup: middleware stack + route mounting.
+- `src/index.js`: loads environment variables via `dotenv/config` and starts the server.
+- `src/server.js`: starts the HTTP listener.
+- `src/app.js`: creates the Express app, configures middleware, and mounts routers.
 
-### Routing
+### Routes
 - `src/routes/auth.routes.js`
-  - `POST /api/auth/sign-up` → `signup` controller (implemented)
-  - `POST /api/auth/sign-in` → placeholder
-  - `POST /api/auth/sign-out` → placeholder
+  - `POST /api/auth/sign-up`
+  - `POST /api/auth/sign-in`
+  - `POST /api/auth/sign-out`
+- `src/routes/users.routes.js`
+  - `GET /api/users/` (intended: authenticated; comment says “admin only”)
+  - `GET /api/users/:id` (intended: authenticated)
+  - `PUT /api/users/:id` (intended: authenticated; user can update self, admin can update anyone)
+  - `DELETE /api/users/:id` (intended: authenticated + admin)
 
 ### Controllers
 - `src/controllers/auth.controller.js`
-  - Validates request body using Zod
-  - Calls the auth service to create users
-  - Signs a JWT and stores it in a cookie
-  - Returns a 201 with a sanitized user payload
+  - Validates request bodies using Zod schemas.
+  - Calls auth services.
+  - Issues JWTs and sets/clears the `token` cookie.
+- `src/controllers/users.controller.js`
+  - Validates `:id` and update payloads (intended via `#validations/users.validation.js`).
+  - Performs authorization checks using `req.user` (role + id).
+  - Delegates DB operations to `src/services/users.service.js`.
 
 ### Services
 - `src/services/auth.service.js`
-  - Password hashing via bcrypt
-  - Creates users via Drizzle ORM
+  - Hashes and compares passwords using `bcrypt`.
+  - Creates users and authenticates credentials against the DB.
+- `src/services/users.service.js`
+  - Implements select/update/delete operations against the `users` table via Drizzle.
 
-### Database
+### Database + ORM
 - `src/config/database.js`
-  - Neon serverless Postgres driver + Drizzle client
+  - Uses `@neondatabase/serverless` with Drizzle’s `neon-http` driver.
+  - In development, configures Neon Local fetch endpoint.
 - `src/models/user.model.js`
-  - Drizzle schema for `users`
-- `drizzle/`
-  - Generated migrations and metadata (e.g. initial `users` table)
+  - Defines `users` table: `id`, `name`, `email` (unique), `password` (hash), `role`, `created_at`, `updated_at`.
+- `drizzle.config.js` and `drizzle/`
+  - Drizzle schema points at `src/models/*.js`.
+  - Migrations live in `drizzle/*.sql`.
 
-### Utilities / Cross-cutting
-- `src/config/logger.js` (winston)
-- `src/utils/jwt.js` (jsonwebtoken wrapper)
-- `src/utils/cookies.js` (cookie helpers)
-- `src/utils/format.js` (validation error formatting)
-- `src/validations/auth.validation.js` (zod schemas)
+### Security & Middleware
+- `src/config/arcjet.js`
+  - Global Arcjet rules: shield, bot detection, and a sliding window rate-limit.
+- `src/middleware/security.middleware.js`
+  - Applies additional role-based rate limiting (guest/user/admin) using Arcjet.
+  - Uses `req.user?.role` if present; otherwise treats requests as `guest`.
+
+### Utilities
+- `src/utils/jwt.js`: wrapper around `jsonwebtoken` for sign/verify.
+- `src/utils/cookies.js`: cookie helpers with secure defaults.
+- `src/utils/format.js`: transforms Zod errors into a client-friendly format.
 
 ## 4) Data Flow & Communication
-Typical HTTP request flow:
+Everything happens in-process (no microservices/message bus). Communication is:
+- **HTTP (client → Express)**
+- **In-memory calls (router → controller → service)**
+- **DB calls (service → Drizzle → PostgreSQL/Neon)**
 
+### Request pipeline (current)
 ```text
 Client
-  -> Express middleware (helmet/cors/body parsing/cookies/morgan)
-    -> Route (src/routes/*)
-      -> Controller (src/controllers/*)
-        -> Service (src/services/*)
-          -> DB (Drizzle + Neon driver)
-        <- Controller (cookie + JSON response)
-  <- Response
+  -> Express (helmet, cors, json/urlencoded, cookie-parser)
+  -> Morgan access logs -> Winston logger
+  -> securityMiddleware (Arcjet shield/bot/rate limit)
+  -> Router (/api/auth or /api/users)
+  -> Controller (Zod validation, authZ checks)
+  -> Service (business logic + DB)
+  -> Response
 ```
 
-Logging flow:
-- HTTP access logs via `morgan('combined')`
-- Morgan writes into Winston (`logger.info(...)`)
-- Winston writes to `logs/combined.log`, `logs/error.log` (+ console in non-prod)
-
 ## 5) Tech Stack & Dependencies
-- Runtime: **Node.js** (ES modules via `"type": "module"`)
-- Web: **Express**, **helmet**, **cors**, **cookie-parser**, **morgan**
+From `package.json`:
+- Runtime / platform: **Node.js**, **ESM** (`"type": "module"`)
+- Web framework: **Express**
+- Security: **helmet**, **cors**, **Arcjet** (`@arcjet/node`, `@arcjet/inspect`)
+- Auth & crypto: **jsonwebtoken**, **bcrypt**
 - Validation: **zod**
-- Auth/security: **bcrypt**, **jsonwebtoken**
-- DB: **PostgreSQL** with **Drizzle ORM** + **drizzle-kit**, using **Neon serverless** driver (`@neondatabase/serverless`)
-- Tooling: ESLint + Prettier
+- Logging: **morgan** (HTTP access) + **winston** (structured logs)
+- DB/ORM: **PostgreSQL** via **Neon serverless driver** + **Drizzle ORM**
+- Tooling: **drizzle-kit**, **eslint**, **prettier**
 
-## 6) Example Execution Flow — `POST /api/auth/sign-up`
-1. Request enters Express app (`src/app.js`)
-2. Middleware runs (helmet/cors/json/urlencoded/cookie-parser/morgan)
-3. Route match: `/api/auth/sign-up` → `signup`
-4. Controller validates input with `signupSchema.safeParse`
-5. Service hashes password and inserts user via Drizzle
-6. Controller signs JWT and sets cookie `token`
-7. Responds with `201` and user payload (without password)
+Notable detail: the project uses Node import aliases (e.g. `#routes/*`, `#services/*`).
 
-## 7) Strengths
-- Clear separation of concerns (routes/controllers/services/models)
-- Solid baseline middleware stack (security headers, request logging)
-- Schema + migrations in place via Drizzle
-- Request validation at boundaries via Zod
+## 6) Execution Flow (example workflows)
 
-## 8) Issues / Tradeoffs / Watch-outs (based on current code)
+### A) Sign-up (`POST /api/auth/sign-up`)
+1. Request hits `src/app.js` middleware stack.
+2. `src/routes/auth.routes.js` routes to `signup`.
+3. `src/controllers/auth.controller.js:signup`
+   - Validates payload via `signupSchema`.
+   - Calls `createUser`.
+4. `src/services/auth.service.js:createUser`
+   - Checks if email exists.
+   - Hashes password (`bcrypt.hash`).
+   - Inserts the user into the `users` table.
+5. Controller signs a JWT (`jwttoken.sign({id, email, role})`).
+6. Sets `token` cookie (`cookies.set`).
+7. Returns `201` with user fields (no password).
 
-### Missing centralized error handling
-- Controllers call `next(error)` in places, but `src/app.js` does not define a global error-handling middleware to format errors consistently.
+### B) Sign-in (`POST /api/auth/sign-in`)
+1. Controller validates input with `signinSchema`.
+2. Service loads the user by email.
+3. Service verifies password with `bcrypt.compare`.
+4. Controller sets `token` cookie and returns user info.
 
-### `createUser` existing-user check likely broken
-In `src/services/auth.service.js`:
-- The `select()` query is not `await`ed.
-- `.from('users')` uses a string; typically Drizzle uses `.from(users)`.
-- As written, `existingUser.length` is unlikely to behave correctly.
+### C) Fetch a user (`GET /api/users/:id`)
+Intended flow:
+1. Auth middleware should authenticate the request, set `req.user`, and call `next()`.
+2. Users controller validates `:id`.
+3. Users service loads the row via Drizzle.
+4. Returns the user profile.
 
-### Error message mismatch between controller and service
-- Controller checks: `error.message === 'User with this email already exists'`
-- Service throws: `new Error('User already exists')`
-- Result: conflict errors likely won’t map to the intended `409` response.
+## 7) Strengths & Tradeoffs
 
-### Cookie option typo
-In `src/utils/cookies.js`:
-- `maxAfge` should be `maxAge`, so cookie expiration likely isn’t applied.
+### Strengths
+- Clean, recognizable layering (routes → controllers → services → DB) that scales well for more endpoints.
+- Zod-based request validation keeps controllers explicit and safer.
+- Drizzle schema + migrations provide a clear DB contract.
+- Arcjet provides a strong baseline for bot detection and common attack protection.
 
-### Logger format bug
-In `src/config/logger.js`:
-- `format.combine((winston.format.timestamp(), winston.format.errors(...), winston.format.json()))` uses the comma operator, so timestamp/error formatting are effectively dropped and only the last formatter may apply.
+### Tradeoffs / Things to watch
+- **Missing modules referenced by imports (currently breaks startup):**
+  - `src/routes/users.routes.js` imports `#middleware/auth.middleware.js`, but only `security.middleware.js` exists.
+  - `src/controllers/users.controller.js` imports `#validations/users.validation.js`, but it does not exist.
+- **No centralized error handler:** controllers call `next(e)`, but `src/app.js` does not register an error-handling middleware (so errors may be unhandled/returned inconsistently).
+- **Auth error contract mismatch:**
+  - `authenticateUser()` throws `"Invalid Password"`, but the controller only maps `"Invalid credentials"` to a 401. Result: invalid password may become a 500 unless handled elsewhere.
+- **Validation formatting bug:** `formatValidationError()` calls `i.message.join(',')` even though Zod issue `message` is a string; this can throw during error formatting.
+- **Winston logger format bug:** `src/config/logger.js` uses the comma operator inside `format.combine(...)`, which prevents the intended timestamp/error formatting from being applied.
+- **Security layering:** Arcjet is configured globally in `src/config/arcjet.js` *and* `security.middleware.js` adds another per-role limiter, which may be redundant.
+- **Security defaults:**
+  - `cors()` is open by default.
+  - `JWT_SECRET` has a production-unsafe fallback string.
+  - Cookie lifetime (`maxAge` 15 minutes) and JWT lifetime (`1d`) are not aligned; there’s no refresh-token flow.
 
-### Security defaults to review
-- `src/utils/jwt.js` uses a fallback `JWT_SECRET` value; production should require a real secret.
-- `cors()` is currently default/open; consider restricting origins.
-- Cookie approach is present, but evaluate CSRF protection depending on how the cookie is used.
-
+## 8) Final Summary (2–3 sentences)
+Acquisitions is a Node/Express REST API built as a modular monolith using a routes → controllers → services → Drizzle(Postgres) architecture. It supports cookie-based JWT authentication and a Users module, and it uses Arcjet plus common Express middleware for security and observability. The current codebase has a few integration gaps (missing auth/users validation modules and missing global error handling) that should be fixed to make the Users routes fully functional.
